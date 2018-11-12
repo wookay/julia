@@ -10,6 +10,12 @@ New language features
   * The experimental macro `Base.@locals` returns a dictionary of current local variable names
     and values ([#29733]).
 
+Multi-threading changes
+-----------------------
+
+  * The `Condition` and `ReentrantLock` types now come in thread-safe variants formed by adding `MT` to their name.
+    Single-threaded variants now exist additionally with the `ST` suffix — these are v1.0 defaults ([#TBD]).
+
 Language changes
 ----------------
 
