@@ -3,7 +3,7 @@
 abstract type AbstractChannel{T} end
 
 """
-    Channel{T}(sz::Int)
+    Channel{T}(sz::Int, threadsafe::Bool)
 
 Constructs a `Channel` with an internal buffer that can hold a maximum of `sz` objects
 of type `T`.
@@ -12,6 +12,9 @@ of type `T`.
 `Channel(0)` constructs an unbuffered channel. `put!` blocks until a matching `take!` is called.
 And vice-versa.
 
+If `threadsafe` is true, some API operations (specifically `wait`) require first acquiring
+the lock on the Channel object.
+
 Other constructors:
 
 * `Channel(Inf)`: equivalent to `Channel{Any}(typemax(Int))`
@@ -19,39 +22,30 @@ Other constructors:
 """
 mutable struct Channel{T} <: AbstractChannel{T}
     cond_take::Condition                 # waiting for data to become available
+    cond_wait::Condition                 # waiting for data to become maybe available
     cond_put::Condition                  # waiting for a writeable slot
     state::Symbol
-    excp::Union{Exception, Nothing}         # exception to be thrown when state != :open
+    excp::Union{Exception, Nothing}      # exception to be thrown when state != :open
 
     data::Vector{T}
     sz_max::Int                          # maximum size of channel
 
-    # Used when sz_max == 0, i.e., an unbuffered channel.
-    waiters::Int
-    takers::Vector{Task}
-    putters::Vector{Task}
-
-    function Channel{T}(sz::Float64) where T
-        if sz == Inf
-            Channel{T}(typemax(Int))
-        else
-            Channel{T}(convert(Int, sz))
-        end
-    end
-    function Channel{T}(sz::Integer) where T
+    function Channel{T}(sz::Integer, threadsafe::Bool=false) where T
         if sz < 0
             throw(ArgumentError("Channel size must be either 0, a positive integer or Inf"))
         end
-        ch = new(Condition(), Condition(), :open, nothing, Vector{T}(), sz, 0)
-        if sz == 0
-            ch.takers = Vector{Task}()
-            ch.putters = Vector{Task}()
-        end
-        return ch
+        lock = threadsafe ? ReentrantLock() : AlwaysLockedST()
+        cond_put, cond_take = Condition(lock), Condition(lock)
+        cond_wait = (sz == 0 ? Condition(lock) : cond_take) # wait is distinct from take iff unbuffered
+        return new(cond_take, cond_wait, cond_put, :open, nothing, Vector{T}(), sz)
     end
 end
 
-Channel(sz) = Channel{Any}(sz)
+function Channel{T}(sz::Float64, threadsafe::Bool=false) where T
+    sz = (sz == Inf ? typemax(Int) : convert(Int, sz))
+    return Channel{T}(sz)
+end
+Channel(sz, threadsafe::Bool=false) = Channel{Any}(sz, threadsafe)
 
 # special constructors
 """
@@ -100,8 +94,8 @@ julia> istaskdone(taskref[])
 true
 ```
 """
-function Channel(func::Function; ctype=Any, csize=0, taskref=nothing)
-    chnl = Channel{ctype}(csize)
+function Channel(func::Function, threadsafe::Bool=false; ctype=Any, csize=0, taskref=nothing)
+    chnl = Channel{ctype}(csize, threadsafe)
     task = Task(() -> func(chnl))
     bind(chnl, task)
     yield(task) # immediately start it
@@ -130,9 +124,14 @@ Close a channel. An exception is thrown by:
 * [`take!`](@ref) and [`fetch`](@ref) on an empty, closed channel.
 """
 function close(c::Channel)
-    c.state = :closed
-    c.excp = closed_exception()
-    notify_error(c)
+    lock(c)
+    try
+        c.state = :closed
+        c.excp = closed_exception()
+        notify_error(c)
+    finally
+        unlock(c)
+    end
     nothing
 end
 isopen(c::Channel) = (c.state == :open)
@@ -190,7 +189,7 @@ Stacktrace:
 function bind(c::Channel, task::Task)
     ref = WeakRef(c)
     register_taskdone_hook(task, tsk->close_chnl_on_taskdone(tsk, ref))
-    c
+    return c
 end
 
 """
@@ -220,17 +219,30 @@ function channeled_tasks(n::Int, funcs...; ctypes=fill(Any,n), csizes=fill(0,n))
 end
 
 function close_chnl_on_taskdone(t::Task, ref::WeakRef)
-    if ref.value !== nothing
-        c = ref.value
-        !isopen(c) && return
-        if istaskfailed(t)
-            c.state = :closed
-            c.excp = task_result(t)
-            notify_error(c)
-        else
-            close(c)
+    c = ref.value
+    if c isa Channel
+        isopen(c) || return
+        if !trylock(c)
+            # can't use `lock`, since attempts to task-switch to wait for it
+            # will just silently fail and leave us with broken state,
+            # so schedule this to happen once we are finished destroying our task
+            @async close_chnl_on_taskdone(t, ref)
+            return nothing
+        end
+        try
+            isopen(c) || return
+            if istaskfailed(t)
+                c.state = :closed
+                c.excp = task_result(t)
+                notify_error(c)
+            else
+                close(c)
+            end
+        finally
+            unlock(c)
         end
     end
+    nothing
 end
 
 struct InvalidStateException <: Exception
@@ -252,33 +264,39 @@ task.
 function put!(c::Channel{T}, v) where T
     check_channel_state(c)
     v = convert(T, v)
-    isbuffered(c) ? put_buffered(c,v) : put_unbuffered(c,v)
+    return isbuffered(c) ? put_buffered(c, v) : put_unbuffered(c, v)
 end
 
 function put_buffered(c::Channel, v)
-    while length(c.data) == c.sz_max
-        wait(c.cond_put)
+    lock(c)
+    try
+        while length(c.data) == c.sz_max
+            check_channel_state(c)
+            wait(c.cond_put)
+        end
+        push!(c.data, v)
+        # notify all, since some of the waiters may be on a "fetch" call.
+        notify(c.cond_take, nothing, true, false)
+    finally
+        unlock(c)
     end
-    push!(c.data, v)
-
-    # notify all, since some of the waiters may be on a "fetch" call.
-    notify(c.cond_take, nothing, true, false)
-    v
+    return v
 end
 
 function put_unbuffered(c::Channel, v)
-    if length(c.takers) == 0
-        push!(c.putters, current_task())
-        c.waiters > 0 && notify(c.cond_take, nothing, false, false)
-
-        try
-            wait()
-        catch
-            filter!(x->x!=current_task(), c.putters)
-            rethrow()
+    lock(c)
+    taker = try
+        while isempty(c.cond_take.waitq)
+            check_channel_state(c)
+            notify(c.cond_wait)
+            wait(c.cond_put)
         end
+        # unfair scheduled version of: notify(c.cond_take, v, false, false); yield()
+        popfirst!(c.cond_take.waitq)
+    finally
+        unlock(c)
     end
-    taker = popfirst!(c.takers)
+    # unfair version of: schedule(taker, v); yield()
     yield(taker, v) # immediately give taker a chance to run, but don't block the current task
     return v
 end
@@ -293,8 +311,16 @@ remove the item. `fetch` is unsupported on an unbuffered (0-size) channel.
 """
 fetch(c::Channel) = isbuffered(c) ? fetch_buffered(c) : fetch_unbuffered(c)
 function fetch_buffered(c::Channel)
-    wait(c)
-    c.data[1]
+    lock(c)
+    try
+        while isempty(c.data)
+            check_channel_state(c)
+            wait(c.cond_take)
+        end
+        return c.data[1]
+    finally
+        unlock(c)
+    end
 end
 fetch_unbuffered(c::Channel) = throw(ErrorException("`fetch` is not supported on an unbuffered Channel."))
 
@@ -309,32 +335,31 @@ task.
 """
 take!(c::Channel) = isbuffered(c) ? take_buffered(c) : take_unbuffered(c)
 function take_buffered(c::Channel)
-    wait(c)
-    v = popfirst!(c.data)
-    notify(c.cond_put, nothing, false, false) # notify only one, since only one slot has become available for a put!.
-    v
+    lock(c)
+    try
+        while isempty(c.data)
+            check_channel_state(c)
+            wait(c.cond_take)
+        end
+        v = popfirst!(c.data)
+        notify(c.cond_put, nothing, false, false) # notify only one, since only one slot has become available for a put!.
+        return v
+    finally
+        unlock(c)
+    end
 end
 
 popfirst!(c::Channel) = take!(c)
 
 # 0-size channel
 function take_unbuffered(c::Channel{T}) where T
-    check_channel_state(c)
-    push!(c.takers, current_task())
+    lock(c)
     try
-        if length(c.putters) > 0
-            let refputter = Ref(popfirst!(c.putters))
-                return Base.try_yieldto(refputter) do putter
-                    # if we fail to start putter, put it back in the queue
-                    putter === current_task || pushfirst!(c.putters, putter)
-                end::T
-            end
-        else
-            return wait()::T
-        end
-    catch
-        filter!(x->x!=current_task(), c.takers)
-        rethrow()
+        check_channel_state(c)
+        notify(c.cond_put, nothing, false, false)
+        return wait(c.cond_take)::T
+    finally
+        unlock(c)
     end
 end
 
@@ -348,36 +373,25 @@ For unbuffered channels returns `true` if there are tasks waiting
 on a [`put!`](@ref).
 """
 isready(c::Channel) = n_avail(c) > 0
-n_avail(c::Channel) = isbuffered(c) ? length(c.data) : length(c.putters)
+n_avail(c::Channel) = isbuffered(c) ? length(c.data) : length(c.cond_put.waitq)
 
-wait(c::Channel) = isbuffered(c) ? wait_impl(c) : wait_unbuffered(c)
-function wait_impl(c::Channel)
+lock(c::Channel) = lock(c.cond_take)
+unlock(c::Channel) = unlock(c.cond_take)
+trylock(c::Channel) = trylock(c.cond_take)
+
+function wait(c::Channel)
     while !isready(c)
         check_channel_state(c)
-        wait(c.cond_take)
-    end
-    nothing
-end
-
-function wait_unbuffered(c::Channel)
-    c.waiters += 1
-    try
-        wait_impl(c)
-    finally
-        c.waiters -= 1
+        wait(c.cond_wait)
     end
     nothing
 end
 
 function notify_error(c::Channel, err)
     notify_error(c.cond_take, err)
+    notify_error(c.cond_wait, err)
     notify_error(c.cond_put, err)
-
-    # release tasks on a `wait()/yieldto()` call (on unbuffered channels)
-    if !isbuffered(c)
-        waiters = filter!(t->(t.state == :runnable), vcat(c.takers, c.putters))
-        foreach(t->schedule(t, err; error=true), waiters)
-    end
+    nothing
 end
 notify_error(c::Channel) = notify_error(c, c.excp)
 
@@ -389,7 +403,7 @@ function iterate(c::Channel, state=nothing)
     try
         return (take!(c), nothing)
     catch e
-        if isa(e, InvalidStateException) && e.state==:closed
+        if isa(e, InvalidStateException) && e.state == :closed
             return nothing
         else
             rethrow()
