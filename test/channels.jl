@@ -56,12 +56,10 @@ end
 
 @testset "type conversion in put!" begin
     c = Channel{Int64}(0)
-    lock(c)
     @async put!(c, Int32(1))
     wait(c)
     @test isa(take!(c), Int64)
     @test_throws MethodError put!(c, "")
-    unlock(c)
     @assert !islocked(c.cond_take)
 end
 
@@ -122,7 +120,6 @@ using Distributed
         while isopen(cs[i])
             yield()
         end
-        i < 3 && foreach(lock, cs)
         @test_throws ErrorException wait(cs[i])
         @test_throws ErrorException take!(cs[i])
         @test_throws ErrorException put!(cs[i], 1)
@@ -145,11 +142,9 @@ using Distributed
     c = Channel(N)
     foreach(t -> bind(c, t), tasks)
     foreach(schedule, tasks)
-    lock(c)
     @test_throws InvalidStateException wait(c)
     @test !isopen(c)
     @test ref[] == nth
-    unlock(c)
     @assert !islocked(c.cond_take)
 
     # channeled_tasks
@@ -158,10 +153,8 @@ using Distributed
         chnls, tasks = Base.channeled_tasks(2, tf_chnls1; ctypes=[T,T], csizes=[N,N])
         put!(chnls[1], 1)
         @test take!(chnls[2]) === 2
-        foreach(lock, chnls)
         @test_throws InvalidStateException wait(chnls[1])
         @test_throws InvalidStateException wait(chnls[2])
-        foreach(unlock, chnls)
         @test istaskdone(tasks[1])
         @test !isopen(chnls[1])
         @test !isopen(chnls[2])
@@ -183,10 +176,8 @@ using Distributed
         yield()
         put!(f, 1) # allow tf4 and tf5 to exit after now, eventually closing the channel
 
-        foreach(lock, chnls)
         @test_throws InvalidStateException wait(chnls[1])
         @test_throws InvalidStateException wait(chnls[2])
-        foreach(unlock, chnls)
         @test istaskdone(tasks[1])
         @test istaskdone(tasks[2])
         @test !isopen(chnls[1])
