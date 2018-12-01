@@ -27,12 +27,13 @@ problematic for performance, so the results need to be used judiciously.
 In particular, unions containing either [`missing`](@ref) or [`nothing`](@ref) are displayed in yellow, since
 these are often intentional.
 
-Keyword argument `debuginfo` may be one of source or none (default), to specify the verbosity of code comments.
+Keyword argument `debuginfo` may be one of `:source` or `:none` (default), to specify the verbosity of code comments.
 
 See [`@code_warntype`](@ref man-code-warntype) for more information.
 """
 function code_warntype(io::IO, @nospecialize(f), @nospecialize(t); debuginfo::Symbol=:default)
-    lineprinter = Base.IRShow.debuginfo[debuginfo]
+    debuginfo = Base.IRShow.debuginfo(debuginfo)
+    lineprinter = Base.IRShow.__debuginfo[debuginfo]
     for (src, rettype) in code_typed(f, t)
         lambda_io::IOContext = io
         if src.slotnames !== nothing
@@ -79,9 +80,8 @@ function _dump_function_linfo(linfo::Core.MethodInstance, world::UInt, native::B
     if syntax != :att && syntax != :intel
         throw(ArgumentError("'syntax' must be either :intel or :att"))
     end
-    if debuginfo == :default
-        debuginfo = :source
-    elseif debuginfo != :source && debuginfo != :none
+    debuginfo = Base.IRShow.debuginfo(debuginfo)
+    if debuginfo != :source && debuginfo != :none
         throw(ArgumentError("'debuginfo' must be either :source or :none"))
     end
     if native
