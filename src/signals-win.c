@@ -360,8 +360,8 @@ static DWORD WINAPI profile_bt( LPVOID lparam )
             // that backtrace.  We take this as a sign that we should quit profiling early, and we
             // even go as far as to stop the timer to signify that we shouldn't profile anymore.
             if (bt_size_step == bt_size_max - bt_size_cur) {
-                jl_safe_printf("WARNING: profiler buffer exhausted!  You may need to increase your profile buffer size.\n");
-                jl_profile_stop_timer()
+                bt_overflow = 1;
+                jl_profile_stop_timer();
                 break;
             } else {
                 // If we didn't overrun, then include this block by moving up the current index

@@ -698,10 +698,9 @@ static void *signal_listener(void *arg)
                                                      signal_context);
 
                         // Check to see if we have overrun our backtrace buffer, and if we have, do not record
-                        // that backtrace.  We take this as a sign that we should quit profiling early, and we
-                        // even go as far as to stop the timer to signify that we shouldn't profile anymore.
+                        // that backtrace.  We take this as a sign that we should quit profiling early.
                         if (n == bt_size_max - bt_size_cur) {
-                            jl_safe_printf("WARNING: profiler buffer exhausted!  You may need to increase your profile buffer size.\n");
+                            bt_overflow = 1;
                             jl_profile_stop_timer();
                         } else {
                             // If we didn't overrun, then include this block by moving up the current index
