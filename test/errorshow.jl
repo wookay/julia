@@ -156,15 +156,16 @@ end
 macro except_strbt(expr, err_type)
     errmsg = "expected failure, but no exception thrown for $expr"
     return quote
-        let err = nothing
+        let err = nothing, bt = nothing
             try
                 $(esc(expr))
             catch err
+                bt = catch_backtrace()
             end
             err === nothing && error($errmsg)
             @test typeof(err) === $(esc(err_type))
             buf = IOBuffer()
-            showerror(buf, err, catch_backtrace())
+            showerror(buf, err, bt)
             String(take!(buf))
         end
     end
@@ -537,4 +538,13 @@ end
     @test occursin("f28442", output[4])
     @test occursin("the last 2 lines are repeated 5000 more times", output[5])
     @test output[6][1:8] == " [10003]"
+end
+
+@testset "Nested errors" begin
+    # LoadError and InitError used to print the nested exception.
+    # This is now dealt with via the exception stack so these print very simply:
+    @test sprint(Base.showerror, LoadError("somefile.jl", 10, ErrorException("retained for backward compat"))) ==
+          "LoadError in expression starting at somefile.jl:10"
+    @test sprint(Base.showerror, InitError(:some_module, ErrorException("retained for backward compat"))) ==
+          "InitError during initialization of module some_module"
 end
