@@ -314,17 +314,9 @@ include("env.jl")
 include("libuv.jl")
 include("event.jl")
 include("task.jl")
-include("lock.jl")
 include("threads.jl")
+include("lock.jl")
 include("weakkeydict.jl")
-
-# default (Julia v1.0) is currently single-threaded
-const Condition = GenericCondition{Union{AlwaysLockedST, Threads.ReentrantLockMT}}
-Condition() = Condition(AlwaysLockedST())
-Condition(threadsafe::Bool) = Condition(threadsafe ? Threads.ReentrantLockMT() : AlwaysLockedST())
-# but uses MT-safe versions, when possible
-const ReentrantLock = Threads.ReentrantLockMT
-const Event = Threads.EventMT
 
 # Logging
 include("logging.jl")

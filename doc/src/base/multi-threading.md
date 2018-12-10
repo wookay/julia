@@ -30,16 +30,6 @@ Base.Threads.atomic_fence
 Base.@threadcall
 ```
 
-## Task Synchronization
-
-Multi-thread-aware versions of the equivalent single-threaded construct.
-
-```@docs
-Base.Threads.ConditionMT
-Base.Threads.EventMT
-Base.Threads.ReentrantLockMT
-```
-
 # Low-level synchronization primitives
 
 These building blocks are used to create the regular synchronization objects.
@@ -47,5 +37,4 @@ These building blocks are used to create the regular synchronization objects.
 ```@docs
 Base.Threads.Mutex
 Base.Threads.SpinLock
-Base.Threads.RecursiveSpinLock
 ```

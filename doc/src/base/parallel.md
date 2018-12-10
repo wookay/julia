@@ -18,9 +18,6 @@ Base.task_local_storage(::Function, ::Any, ::Any)
 
 # Scheduling
 
-These objects assume single-threaded usage.
-For multi-threaded usage, see their MT-suffixed variants.
-
 ```@docs
 Base.yield
 Base.yieldto
@@ -29,6 +26,7 @@ Base.wait
 Base.timedwait
 
 Base.Condition
+Base.Threads.Condition
 Base.notify
 Base.schedule
 

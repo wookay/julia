@@ -92,7 +92,7 @@ called can be woken up. For level-triggered notifications, you must keep extra s
 track of whether a notification has happened. The [`Channel`](@ref) and [`Event`](@ref) types do
 this, and can be used for level-triggered events.
 
-This object is NOT thread-safe. See [`Threads.ConditionMT`](@ref) for a thread-safe version.
+This object is NOT thread-safe. See [`Threads.Condition`](@ref) for a thread-safe version.
 """
 struct GenericCondition{L<:AbstractLock}
     waitq::Vector{Any}
@@ -183,52 +183,9 @@ Return `true` if no tasks are waiting on the condition, `false` otherwise.
 isempty(c::GenericCondition) = isempty(c.waitq)
 
 
-"""
-    Event()
-
-Create a level-triggered event source. Tasks that call [`wait`](@ref) on an
-`Event` are suspended and queued until `notify` is called on the `Event`.
-After `notify` is called, the `Event` remains in a signaled state and
-tasks will no longer block when waiting for it.
-
-!!! compat "Julia 1.1"
-    This functionality requires at least Julia 1.1.
-"""
-mutable struct GenericEvent{L<:AbstractLock}
-    notify::GenericCondition{L}
-    set::Bool
-    GenericEvent{L}() where {L<:AbstractLock} = new{L}(GenericCondition{L}(), false)
-end
-
-function wait(e::GenericEvent)
-    e.set && return
-    lock(e.notify)
-    try
-        while !e.set
-            wait(e.notify)
-        end
-    finally
-        unlock(e.notify)
-    end
-    nothing
-end
-
-function notify(e::GenericEvent)
-    lock(e.notify)
-    try
-        if !e.set
-            e.set = true
-            notify(e.notify)
-        end
-    finally
-        unlock(e.notify)
-    end
-    nothing
-end
-
-
-const ConditionST = GenericCondition{AlwaysLockedST}
-const EventST = GenericEvent{CooperativeLock}
+# default (Julia v1.0) is currently single-threaded
+# (although it uses MT-safe versions, when possible)
+const Condition = GenericCondition{AlwaysLockedST}
 
 
 ## scheduler and work queue
@@ -433,11 +390,11 @@ Use [`isopen`](@ref) to check whether it is still active.
 """
 mutable struct AsyncCondition
     handle::Ptr{Cvoid}
-    cond::ConditionST
+    cond::Condition
     isopen::Bool
 
     function AsyncCondition()
-        this = new(Libc.malloc(_sizeof_uv_async), ConditionST(), true)
+        this = new(Libc.malloc(_sizeof_uv_async), Condition(), true)
         associate_julia_struct(this.handle, this)
         finalizer(uvfinalize, this)
         err = ccall(:uv_async_init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}),
@@ -491,14 +448,14 @@ to check whether a timer is still active.
 """
 mutable struct Timer
     handle::Ptr{Cvoid}
-    cond::ConditionST
+    cond::Condition
     isopen::Bool
 
     function Timer(timeout::Real; interval::Real = 0.0)
         timeout ≥ 0 || throw(ArgumentError("timer cannot have negative timeout of $timeout seconds"))
         interval ≥ 0 || throw(ArgumentError("timer cannot have negative repeat interval of $interval seconds"))
 
-        this = new(Libc.malloc(_sizeof_uv_timer), ConditionST(), true)
+        this = new(Libc.malloc(_sizeof_uv_timer), Condition(), true)
         err = ccall(:uv_timer_init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}), eventloop(), this)
         if err != 0
             #TODO: this codepath is currently not tested

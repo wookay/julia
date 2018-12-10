@@ -2,13 +2,10 @@
 
 import .Base: _uv_hook_close, unsafe_convert,
     lock, trylock, unlock, islocked, wait, notify,
-    AbstractLock, GenericCondition, GenericReentrantLock, GenericEvent
+    AbstractLock
 
-export ConditionMT, EventMT, ReentrantLockMT
-
-# Important Note: these low-level primitives exported here
+# Important Note: these low-level primitives defined here
 #   are typically not for general usage
-export SpinLock, RecursiveSpinLock, Mutex
 
 ##########################################
 # Atomic Locks
@@ -17,16 +14,6 @@ export SpinLock, RecursiveSpinLock, Mutex
 # Test-and-test-and-set spin locks are quickest up to about 30ish
 # contending threads. If you have more contention than that, perhaps
 # a lock is the wrong way to synchronize.
-"""
-    TatasLock()
-
-See [`SpinLock`](@ref).
-"""
-struct TatasLock <: AbstractLock
-    handle::Atomic{Int}
-    TatasLock() = new(Atomic{Int}(0))
-end
-
 """
     SpinLock()
 
@@ -38,14 +25,15 @@ Test-and-test-and-set spin locks are quickest up to about 30ish
 contending threads. If you have more contention than that, perhaps
 a lock is the wrong way to synchronize.
 
-See also [`RecursiveSpinLock`](@ref) for a version that permits recursion.
-
 See also [`Mutex`](@ref) for a more efficient version on one core or if the
 lock may be held for a considerable length of time.
 """
-const SpinLock = TatasLock
+struct SpinLock <: AbstractLock
+    handle::Atomic{Int}
+    SpinLock() = new(Atomic{Int}(0))
+end
 
-function lock(l::TatasLock)
+function lock(l::SpinLock)
     while true
         if l.handle[] == 0
             p = atomic_xchg!(l.handle, 1)
@@ -59,116 +47,20 @@ function lock(l::TatasLock)
     end
 end
 
-function trylock(l::TatasLock)
+function trylock(l::SpinLock)
     if l.handle[] == 0
         return atomic_xchg!(l.handle, 1) == 0
     end
     return false
 end
 
-function unlock(l::TatasLock)
+function unlock(l::SpinLock)
     l.handle[] = 0
     ccall(:jl_cpu_wake, Cvoid, ())
     return
 end
 
-function islocked(l::TatasLock)
-    return l.handle[] != 0
-end
-
-
-"""
-    RecursiveTatasLock()
-
-See [`RecursiveSpinLock`](@ref).
-"""
-struct RecursiveTatasLock <: AbstractLock
-    ownertid::Atomic{Int16}
-    handle::Atomic{Int}
-    RecursiveTatasLock() = new(Atomic{Int16}(0), Atomic{Int}(0))
-end
-
-"""
-    RecursiveSpinLock()
-
-Creates a reentrant lock.
-The same thread can acquire the lock as many times as required.
-Each [`lock`](@ref) must be matched with an [`unlock`](@ref).
-
-See also [`SpinLock`](@ref) for a slightly faster version.
-
-See also [`Mutex`](@ref) for a more efficient version on one core or if the lock
-may be held for a considerable length of time.
-"""
-const RecursiveSpinLock = RecursiveTatasLock
-
-
-function lock(l::RecursiveTatasLock)
-    if l.ownertid[] == threadid()
-        l.handle[] += 1
-        return
-    end
-    while true
-        if l.handle[] == 0
-            if atomic_cas!(l.handle, 0, 1) == 0
-                l.ownertid[] = threadid()
-                return
-            end
-        end
-        ccall(:jl_cpu_pause, Cvoid, ())
-        # Temporary solution before we have gc transition support in codegen.
-        ccall(:jl_gc_safepoint, Cvoid, ())
-    end
-end
-
-function trylock(l::RecursiveTatasLock)
-    if l.ownertid[] == threadid()
-        l.handle[] += 1
-        return true
-    end
-    if l.handle[] == 0
-        if atomic_cas!(l.handle, 0, 1) == 0
-            l.ownertid[] = threadid()
-            return true
-        end
-        return false
-    end
-    return false
-end
-
-function unlock(l::RecursiveTatasLock)
-    l.ownertid[] == threadid() || error("unlock from wrong thread")
-    n = l.handle[]
-    n != 0 || error("unlock count must match lock count")
-    if l.handle[] == 1
-        l.ownertid[] = 0
-        l.handle[] = 0
-        ccall(:jl_cpu_wake, Cvoid, ())
-    else
-        l.handle[] = n - 1
-    end
-    return
-end
-
-function unlockall(l::RecursiveTatasLock)
-    l.ownertid[] == threadid() || error("unlock from wrong thread")
-    n = l.handle[]
-    n != 0 || error("unlock count must match lock count")
-    l.ownertid[] = 0
-    l.handle[] = 0
-    ccall(:jl_cpu_wake, Cvoid, ())
-    return n
-end
-
-function relockall(l::RecursiveTatasLock, n::Int)
-    lock(l)
-    n1 = l.handle[]
-    l.handle[] = n
-    n1 == 1 || error("concurrency violation detected")
-    return
-end
-
-function islocked(l::RecursiveTatasLock)
+function islocked(l::SpinLock)
     return l.handle[] != 0
 end
 
@@ -243,44 +135,3 @@ end
 function islocked(m::Mutex)
     return m.ownertid != 0
 end
-
-"""
-    ReentrantLockMT()
-
-A thread-safe version of [`ReentrantLock`](@ref).
-
-!!! compat "Julia 1.1"
-    This functionality requires at least Julia 1.1.
-"""
-const ReentrantLockMT = GenericReentrantLock{TatasLock}
-
-"""
-    ConditionMT([lock-mt])
-
-A thread-safe version of [`Condition`](@ref).
-
-!!! compat "Julia 1.1"
-    This functionality requires at least Julia 1.1.
-"""
-const ConditionMT = GenericCondition{ReentrantLockMT}
-
-"""
-    EventMT()
-
-A thread-safe version of [`Event`](@ref).
-
-!!! compat "Julia 1.1"
-    This functionality requires at least Julia 1.1.
-"""
-const EventMT = GenericEvent{ReentrantLockMT}
-
-"""
-Special note for [`Threads.ConditionMT`](@ref):
-
-The caller must be holding the [`lock`](@ref) that owns `c` before calling this method.
-The calling task will be blocked until some other task wakes it,
-usually by calling [`notify`](@ref)` on the same ConditionMT object.
-The lock will be atomically released when blocking (even if it was locked recursively),
-and will be reacquired before returning.
-"""
-wait(c::ConditionMT)
