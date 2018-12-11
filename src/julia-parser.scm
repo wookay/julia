@@ -8,7 +8,8 @@
 ;; be an operator.
 (define prec-assignment
   (append! (add-dots '(= += -= *= /= //= |\\=| ^= ÷= %= <<= >>= >>>= |\|=| &= ⊻= ≔ ⩴ ≕))
-           '(:= ~ $=)))
+           (add-dots '(~))
+           '(:= $=)))
 ;; comma - higher than assignment outside parentheses, lower when inside
 (define prec-pair (add-dots '(=>)))
 (define prec-conditional '(?))
