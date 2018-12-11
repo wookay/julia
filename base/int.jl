@@ -781,9 +781,13 @@ if Core.sizeof(Int) == 4
                 ys >>>= 1
                 n -= 1
             end
-            q |= UInt128(q32) << s
+            q = (q << 32) | UInt128(q32)
             if (x >> 64) % UInt64 == 0
                 if (y >> 64) % UInt64 == 0
+                    while s >= 32
+                        q <<= 32
+                        s -= 32
+                    end
                     q64, x64 = divrem(x % UInt64, y % UInt64)
                     q |= q64
                     x = UInt128(x64)
